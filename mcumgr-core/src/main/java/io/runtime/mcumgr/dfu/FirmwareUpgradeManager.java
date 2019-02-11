@@ -491,39 +491,68 @@ public class FirmwareUpgradeManager implements FirmwareUpgradeController {
             = new McuMgrTransport.ConnectionObserver() {
         @Override
         public void onConnected() {
-            // ignore
+            // Do nothing
         }
 
         @Override
         public void onDisconnected() {
-            // Device has reset.
-            mDefaultManager.getTransporter().removeObserver(this);
-            LOG.trace("Reset successful");
-            switch (mState) {
-                case NONE:
-                    // Upload was cancelled in VALIDATE state
-                    cancelled(State.VALIDATE);
-                    break;
-                case VALIDATE:
-                    // The device has exited test mode. Slot 1 can now be erased.
-                    validate();
-                    break;
-                case RESET:
-                    switch (mMode) {
-                        case TEST_AND_CONFIRM:
-                            // The device reconnected after testing.
-                            verify();
-                            break;
-                        case TEST_ONLY:
-                        case CONFIRM_ONLY:
-                            // The device has been tested or confirmed.
-                            success();
-                            break;
-                    }
-                    break;
-            }
+            LOG.trace("Device disconnected. Reconnecting...");
+            mDefaultManager.getTransporter().removeObserver(mResetObserver);
+            mDefaultManager.getTransporter().connect(mReconnectCallback);
         }
     };
+
+    /**
+     * State: RESET.
+     * Callback for reconnecting to the device.
+     */
+    private McuMgrTransport.ConnectionCallback mReconnectCallback =
+            new McuMgrTransport.ConnectionCallback() {
+
+                @Override
+                public void onConnected() {
+                    LOG.trace("Reconnect successful.");
+                    continueUpgrade();
+                }
+
+                @Override
+                public void onDeferred() {
+                    LOG.trace("Reconnect deferred.");
+                    continueUpgrade();
+                }
+
+                @Override
+                public void onError(@NotNull Throwable t) {
+                    LOG.trace("Reconnect failed.");
+                    fail(new McuMgrException(t));
+                }
+
+                public void continueUpgrade() {
+                    switch (mState) {
+                        case NONE:
+                            // Upload cancelled in state validate.
+                            cancelled(State.VALIDATE);
+                            break;
+                        case VALIDATE:
+                            // If the reset occurred in the validate state, we must re-validate as
+                            // multiple resets may be required.
+                            validate();
+                            break;
+                        case RESET:
+                            switch (mMode) {
+                                case TEST_AND_CONFIRM:
+                                    // The device reconnected after testing.
+                                    verify();
+                                    break;
+                                case TEST_ONLY:
+                                case CONFIRM_ONLY:
+                                    // The device has been tested or confirmed.
+                                    success();
+                                    break;
+                            }
+                    }
+                }
+            };
 
     /**
      * State: RESET.
@@ -532,12 +561,12 @@ public class FirmwareUpgradeManager implements FirmwareUpgradeController {
     private McuMgrCallback<McuMgrResponse> mResetCallback = new McuMgrCallback<McuMgrResponse>() {
         @Override
         public void onResponse(@NotNull McuMgrResponse response) {
-            // Reset command has been sent.
-            LOG.trace("Reset request sent. Waiting for reset...");
             // Check for an error return code
             if (!response.isSuccess()) {
                 fail(new McuMgrErrorException(response.getReturnCode()));
+                return;
             }
+            LOG.trace("Reset request success. Waiting for reset...");
         }
 
         @Override
@@ -612,7 +641,7 @@ public class FirmwareUpgradeManager implements FirmwareUpgradeController {
 
         public boolean isInProgress() {
             return this == VALIDATE || this == UPLOAD || this == TEST ||
-                    this == RESET    || this == CONFIRM;
+                    this == RESET || this == CONFIRM;
         }
     }
 
@@ -694,13 +723,14 @@ public class FirmwareUpgradeManager implements FirmwareUpgradeController {
     };
 
     //******************************************************************
-    // Main Thread Executor
+    // Internal Callback forwarder
     //******************************************************************
 
     /**
      * Internal callback to route callbacks to the UI thread if the flag has been set.
      */
     private FirmwareUpgradeCallback mInternalCallback = new FirmwareUpgradeCallback() {
+
         private MainThreadExecutor mMainThreadExecutor;
 
         private MainThreadExecutor getMainThreadExecutor() {
@@ -812,6 +842,10 @@ public class FirmwareUpgradeManager implements FirmwareUpgradeController {
             }
         }
     };
+
+    //******************************************************************
+    // Main Thread Executor
+    //******************************************************************
 
     /**
      * Used to execute callbacks on the main UI thread.

@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
 import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -103,6 +104,12 @@ public class McuMgrBleTransport extends BleManager<BleManagerCallbacks> implemen
         setGattCallbacks(new McuMgrBleCallbacksStub());
     }
 
+    /**
+     * Returns the device set in the constructor.
+     *
+     * @return The device to connect to and communicate with.
+     */
+    @NonNull
     @Override
     public BluetoothDevice getBluetoothDevice() {
         return mDevice;
@@ -159,7 +166,8 @@ public class McuMgrBleTransport extends BleManager<BleManagerCallbacks> implemen
             // Await will wait until the device is ready (that is initialization is complete)
             connect(mDevice)
                     .retry(3, 100)
-                    .await(25 * 1000);
+                    .timeout(25 * 1000)
+                    .await();
             if (!wasConnected) {
                 notifyConnected();
             }
@@ -200,7 +208,8 @@ public class McuMgrBleTransport extends BleManager<BleManagerCallbacks> implemen
             final SmpResponse<T> smpResponse = waitForNotification(mSmpCharacteristic)
                     .merge(mSMPMerger)
                     .trigger(writeCharacteristic(mSmpCharacteristic, payload).split())
-                    .await(new SmpResponse<>(responseType), 30000);
+                    .timeout(30000)
+                    .await(new SmpResponse<>(responseType));
             if (smpResponse.isValid()) {
                 //noinspection ConstantConditions
                 return smpResponse.getResponse();
@@ -287,7 +296,8 @@ public class McuMgrBleTransport extends BleManager<BleManagerCallbacks> implemen
                                 }
                             }
                         })
-                        .enqueue(30000);
+                        .timeout(30000)
+                        .enqueue();
             }
         }).fail(new FailCallback() {
             @Override
@@ -316,6 +326,57 @@ public class McuMgrBleTransport extends BleManager<BleManagerCallbacks> implemen
         })
         .retry(3, 100)
         .enqueue();
+    }
+
+    @Override
+    public void connect(@Nullable final ConnectionCallback callback) {
+        if (isConnected()) {
+            if (callback != null) {
+                callback.onConnected();
+            }
+            return;
+        }
+        connect(mDevice)
+                .retry(3, 100)
+                .done(new SuccessCallback() {
+                    @Override
+                    public void onRequestCompleted(@NonNull BluetoothDevice device) {
+                        if (callback == null) {
+                            return;
+                        }
+                        callback.onConnected();
+                        notifyConnected();
+                    }
+                })
+                .fail(new FailCallback() {
+                    @Override
+                    public void onRequestFailed(@NonNull BluetoothDevice device, int status) {
+                        if (callback == null) {
+                            return;
+                        }
+                        switch (status) {
+                            case REASON_DEVICE_DISCONNECTED:
+                                callback.onError(new McuMgrException("Device has disconnected"));
+                                break;
+                            case REASON_DEVICE_NOT_SUPPORTED:
+                                callback.onError(new McuMgrException("Device does not support SMP Service"));
+                                break;
+                            case REASON_REQUEST_FAILED:
+                                // This could be thrown only if the manager was requested to connect for
+                                // a second time and to a different device than the one that's already
+                                // connected. This may not happen here.
+                                callback.onError(new McuMgrException("Other device already connected"));
+                                break;
+                            case REASON_BLUETOOTH_DISABLED:
+                                callback.onError(new McuMgrException("Bluetooth adapter disabled"));
+                                break;
+                            default:
+                                callback.onError(new McuMgrException(GattError.parseConnectionError(status)));
+                                break;
+                        }
+                    }
+                })
+                .enqueue();
     }
 
     @Override
